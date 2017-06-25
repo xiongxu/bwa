@@ -27,7 +27,7 @@ endif
 all:$(PROG)
 
 bwa:libbwa.a $(AOBJS) main.o
-		$(CC) $(CFLAGS) $(DFLAGS) $(AOBJS) main.o -o $@ -L. -lbwa $(LIBS)
+		$(CC) $(CFLAGS) $(DFLAGS) $(AOBJS) main.o ../htslib/libhts.a -o $@ -L. -lbwa $(LIBS)
 
 bwamem-lite:libbwa.a example.o
 		$(CC) $(CFLAGS) $(DFLAGS) example.o -o $@ -L. -lbwa $(LIBS)

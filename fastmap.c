@@ -11,6 +11,7 @@
 #include "kvec.h"
 #include "utils.h"
 #include "bntseq.h"
+#include "kstring.h"
 #include "kseq.h"
 KSEQ_DECLARE(gzFile)
 
@@ -20,6 +21,15 @@ void *kopen(const char *fn, int *_fd);
 int kclose(void *a);
 void kt_pipeline(int n_threads, void *(*func)(void*, int, void*), void *shared_data, int n_steps);
 
+typedef struct sam_global_args {
+	htsFormat in;
+	htsFormat out;
+	char *reference;
+	//int verbosity;
+} sam_global_args;
+
+#define SAM_GLOBAL_ARGS_INIT {{0},{0}}
+
 typedef struct {
 	kseq_t *ks, *ks2;
 	mem_opt_t *opt;
@@ -27,6 +37,9 @@ typedef struct {
 	int64_t n_processed;
 	int copy_comment, actual_chunk_size;
 	bwaidx_t *idx;
+	bam_hdr_t *h;
+	samFile *fb;
+	kstring_t samstr;
 } ktp_aux_t;
 
 typedef struct {
@@ -85,12 +98,31 @@ static void *process(void *shared, int step, void *_data)
 		aux->n_processed += data->n_seqs;
 		return data;
 	} else if (step == 2) {
+		bam1_t *b = bam_init1();
+		char *ptr;
 		for (i = 0; i < data->n_seqs; ++i) {
-			if (data->seqs[i].sam) err_fputs(data->seqs[i].sam, stdout);
+			if (data->seqs[i].sam) {
+				ptr= data->seqs[i].sam;
+				while ((aux->samstr.s = strtok(ptr, "\n")) != NULL) {
+					aux->samstr.l = strlen(aux->samstr.s);
+					int ret = sam_parse1(&aux->samstr,aux->h, b);
+					if (ret < 0) {
+						fprintf(stderr, "[W::%s] parse error\n", __func__);
+						return ret;
+					}
+					ret = sam_write1(aux->fb, aux->h, b);
+					if (ret < 0) {
+						fprintf(stderr, "[W::%s] sam_write1 error \n", __func__);
+						return ret;
+					}
+					ptr = NULL;
+				}
+			}
 			free(data->seqs[i].name); free(data->seqs[i].comment);
 			free(data->seqs[i].seq); free(data->seqs[i].qual); free(data->seqs[i].sam);
 		}
 		free(data->seqs); free(data);
+		bam_destroy1(b);
 		return 0;
 	}
 	return 0;
@@ -110,6 +142,18 @@ static void update_a(mem_opt_t *opt, const mem_opt_t *opt0)
 		if (!opt0->pen_clip3) opt->pen_clip3 *= opt->a;
 		if (!opt0->pen_unpaired) opt->pen_unpaired *= opt->a;
 	}
+}
+
+static void check_sam_close(samFile *fp, const char *fname, const char *null_fname, int *retp)
+{
+	int r = sam_close(fp);
+	if (r >= 0) return;
+
+	// TODO Need error infrastructure so we can print a message instead of r
+	if (fname) fprintf(stderr,"error closing \"%s\": %d", fname, r);
+	else fprintf(stderr,"error closing %s: %d", null_fname, r);
+
+	*retp = EXIT_FAILURE;
 }
 
 int main_mem(int argc, char *argv[])
@@ -233,7 +277,7 @@ int main_mem(int argc, char *argv[])
 	}
 
 	if (opt->n_threads < 1) opt->n_threads = 1;
-	if (optind + 1 >= argc || optind + 3 < argc) {
+	if (optind + 1 >= argc || optind + 4 < argc) {
 		fprintf(stderr, "\n");
 		fprintf(stderr, "Usage: bwa mem [options] <idxbase> <in1.fq> [in2.fq]\n\n");
 		fprintf(stderr, "Algorithm options:\n\n");
@@ -350,7 +394,21 @@ int main_mem(int argc, char *argv[])
 			opt->flag |= MEM_F_PE;
 		}
 	}
-	bwa_print_sam_hdr(aux.idx->bns, hdr_line);
+	char modeout[12];
+	strcpy(modeout, "wb");
+	char *fnout = "-";
+	if (optind + 3 < argc) fnout = argv[optind + 3];
+	int ret=0,level=0;
+	sam_global_args ga = SAM_GLOBAL_ARGS_INIT;
+	if (fnout) sam_open_mode(modeout+1,fnout, NULL);
+	if (level >= 0) sprintf(strchr(modeout, '\0'), "%d", level < 9? level : 9);
+	if ((aux.fb = sam_open_format(fnout , modeout, &ga.out)) == 0) {
+	    err_printf("failed to open \"%s\" for writing", fnout? fnout : "standard output");
+	    return -1;
+	}
+	aux.h = bwa_print_bam_hdr(aux.idx->bns, hdr_line);
+	if (sam_hdr_write(aux.fb, aux.h) != 0) goto fail;
+
 	aux.actual_chunk_size = fixed_chunk_size > 0? fixed_chunk_size : opt->chunk_size * opt->n_threads;
 	kt_pipeline(no_mt_io? 1 : 2, process, &aux, 3);
 	free(hdr_line);
@@ -362,7 +420,11 @@ int main_mem(int argc, char *argv[])
 		kseq_destroy(aux.ks2);
 		err_gzclose(fp2); kclose(ko2);
 	}
-	return 0;
+	if (aux.fb) check_sam_close(aux.fb, fnout, "standard output", &ret);
+	return ret;
+fail:
+	if (aux.fb) check_sam_close(aux.fb, fnout, "standard output", &ret);
+	return ret;
 }
 
 int main_fastmap(int argc, char *argv[])

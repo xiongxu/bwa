@@ -390,6 +390,35 @@ void bwa_print_sam_hdr(const bntseq_t *bns, const char *hdr_line)
 	if (bwa_pg) err_printf("%s\n", bwa_pg);
 }
 
+bam_hdr_t *bwa_print_bam_hdr(const bntseq_t *bns, const char *hdr_line)
+{
+    kstring_t str;
+    bam_hdr_t *h;
+    int i, n_SQ = 0;
+    extern char *bwa_pg;
+    if (hdr_line) {
+        const char *p = hdr_line;
+        while ((p = strstr(p, "@SQ\t")) != 0) {
+            if (p == hdr_line || *(p-1) == '\n') ++n_SQ;
+            p += 4;
+        }
+    }
+    if (n_SQ == 0) {
+        for (i = 0; i < bns->n_seqs; ++i) {
+            ksprintf(&str, "@SQ\tSN:%s\tLN:%d", bns->anns[i].name, bns->anns[i].len);
+            if (bns->anns[i].is_alt) kputsn("\tAH:*\n",6, &str);
+            else kputc('\n', &str);
+        }
+    } else if (n_SQ != bns->n_seqs && bwa_verbose >= 2)
+        fprintf(stderr, "[W::%s] %d @SQ lines provided with -H; %d sequences in the index. Continue anyway.\n", __func__, n_SQ, bns->n_seqs);
+    if (hdr_line) ksprintf(&str, "%s\n",hdr_line);
+    if (bwa_pg) ksprintf(&str, "%s\n",bwa_pg);
+    if (str.l == 0) kputsn("", 0, &str);
+    h = sam_hdr_parse(str.l, str.s);
+    h->l_text = str.l; h->text = str.s;
+    return h;
+}
+
 static char *bwa_escape(char *s)
 {
 	char *p, *q;
